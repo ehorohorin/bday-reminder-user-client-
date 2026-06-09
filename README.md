@@ -7,7 +7,7 @@
 Откройте терминал в папке с проектом и выполните:
 
 ```bash
-pip install pyrogram google-auth google-auth-oauthlib google-api-python-client
+pip install -r requirements.txt 
 ```
 
 ---
