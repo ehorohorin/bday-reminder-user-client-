@@ -1,9 +1,7 @@
 from pyrogram import Client
+from config import API_ID, API_HASH, SESSION_NAME
 
-api_id = #ваше значение
-api_hash = "ваше значние"
-
-app = Client("my_account", api_id=api_id, api_hash=api_hash)
+app = Client(SESSION_NAME, api_id=API_ID, api_hash=API_HASH)
 
 with app:
     for dialog in app.get_dialogs():
