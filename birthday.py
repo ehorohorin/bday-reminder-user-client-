@@ -5,6 +5,8 @@ from google.auth.transport.requests import Request
 from googleapiclient.discovery import build
 import os
 import pickle
+import time
+import calendar
 
 from config import (
     API_ID, API_HASH, CHANNEL_ID, SESSION_NAME,
@@ -46,20 +48,30 @@ def get_google_contacts():
     results = service.people().connections().list(
         resourceName='people/me',
         pageSize=1000,
-        personFields='names,birthdays'
+        personFields='names,birthdays,phoneNumbers'
     ).execute()
 
     contacts = []
     for person in results.get('connections', []):
-        names = person.get('names', [])
         birthdays = person.get('birthdays', [])
-        if names and birthdays:
-            name = names[0].get('displayName', '')
-            bday = birthdays[0].get('date', {})
-            month = bday.get('month')
-            day = bday.get('day')
-            if month and day:
-                contacts.append({'name': name, 'month': month, 'day': day})
+        if not birthdays:
+            continue
+
+        names = person.get('names', [])
+        if names:
+            name = names[0].get('displayName', '').strip() or None
+        else:
+            name = None
+
+        if not name:
+            phones = person.get('phoneNumbers', [])
+            name = phones[0].get('value', 'Без имени') if phones else 'Без имени'
+
+        bday = birthdays[0].get('date', {})
+        month = bday.get('month')
+        day = bday.get('day')
+        if month and day:
+            contacts.append({'name': name, 'month': month, 'day': day})
 
     return contacts
 
@@ -73,12 +85,21 @@ def iter_days_from(start: datetime, count: int):
 
 
 def birthdays_on_day(contacts, day: datetime):
-    
-    return [p for p in contacts if p['month'] == day.month and p['day'] == day.day]
+   
+    result = []
+    for p in contacts:
+        if p['month'] == day.month and p['day'] == day.day:
+            result.append(p)
+       
+        elif p['month'] == 2 and p['day'] == 29 and day.month == 2 and day.day == 28:
+            import calendar
+            if not calendar.isleap(day.year):
+                result.append(p)
+    return result
 
 
 def birthdays_in_week(contacts, week_start: datetime):
-    
+    """Контакты у которых ДР попадает в неделю начиная с week_start."""
     result = []
     for p in contacts:
         for year_offset in [0, 1]:
@@ -98,15 +119,23 @@ def birthdays_in_week(contacts, week_start: datetime):
 
 
 def birthdays_in_month(contacts, month: int):
-  
+    """Контакты у которых ДР в данном месяце, отсортированные по дню."""
     return sorted([p for p in contacts if p['month'] == month], key=lambda x: x['day'])
 
 
 def build_daily_message(contacts, day: datetime):
- 
+    """
+    Собирает единое сообщение для данного дня.
+    Блоки (если есть данные):
+      - Годовая сводка   (только 1 января)
+      - Месячная сводка  (только 1-е число месяца)
+      - Недельная сводка (только понедельник)
+      - Именинники сегодня
+    В конце всегда добавляет HASHTAG.
+    Возвращает текст или None если нечего отправлять.
+    """
     blocks = []
 
-    
     if day.month == 1 and day.day == 1:
         sorted_contacts = sorted(contacts, key=lambda x: (x['month'], x['day']))
         lines = ["🎊 Все дни рождения в этом году:\n"]
@@ -114,7 +143,7 @@ def build_daily_message(contacts, day: datetime):
             lines.append(f"  🎂 {p['day']} {MONTHS_RU_GEN[p['month']]} — {p['name']}")
         blocks.append("\n".join(lines))
 
- 
+    
     if day.day == 1:
         month_bdays = birthdays_in_month(contacts, day.month)
         if month_bdays:
@@ -123,7 +152,6 @@ def build_daily_message(contacts, day: datetime):
                 lines.append(f"  🎂 {p['day']} {MONTHS_RU_GEN[day.month]} — {p['name']}")
             blocks.append("\n".join(lines))
 
-   
     if day.weekday() == 0:
         week_bdays = birthdays_in_week(contacts, day)
         if week_bdays:
@@ -132,7 +160,7 @@ def build_daily_message(contacts, day: datetime):
                 lines.append(f"  🎂 {p['day']} {MONTHS_RU_GEN[p['month']]} — {p['name']}")
             blocks.append("\n".join(lines))
 
-
+   
     today_bdays = birthdays_on_day(contacts, day)
     if today_bdays:
         if len(today_bdays) == 1:
@@ -177,12 +205,12 @@ def schedule_birthdays():
             )
             print(f"🗑 Удалено наших сообщений: {len(our_ids)}")
         else:
-            print("📭 Наших старых сообщений нет")
+            print("Наших старых сообщений нет")
 
         if foreign_count:
-            print(f"⚠️  Чужих сообщений (не трогаем): {foreign_count}")
+            print(f"Чужих сообщений - {foreign_count}")
 
-        # Доступный лимит с учётом чужих сообщений
+        
         available_slots = TELEGRAM_SCHEDULE_LIMIT - foreign_count
         if available_slots <= 0:
             print(f"🚫 Лимит исчерпан чужими сообщениями ({foreign_count}/{TELEGRAM_SCHEDULE_LIMIT}), выходим")
@@ -193,13 +221,12 @@ def schedule_birthdays():
 
         now = datetime.now(timezone.utc)
         final_messages = []
-        MAX_DAYS = 366  
+        MAX_DAYS = 366 
 
         for day in iter_days_from(now, MAX_DAYS):
             if len(final_messages) >= available_slots:
                 break
 
-            
             if day.month == 1 and day.day == 1:
                 send_hour = 1
             elif day.day == 1:
@@ -218,22 +245,34 @@ def schedule_birthdays():
             if text:
                 final_messages.append((send_time, text))
 
-        
-        for schedule_date, text in final_messages:
-            app.send_message(
-                chat_id=CHANNEL_ID,
-                text=text,
-                schedule_date=schedule_date
-            )
+
+        for i, (schedule_date, text) in enumerate(final_messages, 1):
+            while True:
+                try:
+                    app.send_message(
+                        chat_id=CHANNEL_ID,
+                        text=text,
+                        schedule_date=schedule_date
+                    )
+                    print(f" [{i}/{len(final_messages)}] {schedule_date.strftime('%d.%m.%Y')}")
+                    time.sleep(0.1)
+                    break
+                except Exception as e:
+                    if 'FLOOD_WAIT' in str(e):
+                        wait = int(str(e).split('of ')[1].split(' ')[0])
+                        print(f"  ⏳ FloodWait {wait}с, жду...")
+                        time.sleep(wait + 1)
+                    else:
+                        raise
 
         print(f"\n🎯 Итого запланировано: {len(final_messages)} сообщений")
-        print(f"📊 Слотов использовано: {len(final_messages) + foreign_count}/{TELEGRAM_SCHEDULE_LIMIT}")
+        print(f" Слотов использовано: {len(final_messages) + foreign_count}/{TELEGRAM_SCHEDULE_LIMIT}")
 
         if len(final_messages) == available_slots:
             last_date = final_messages[-1][0].strftime("%d.%m.%Y")
-            print(f"⚠️  Достигнут лимит. Последнее сообщение: {last_date}")
+            print(f"Достигнут лимит. Последнее сообщение: {last_date}")
         else:
-            print("✅")
+            print("✅ Все события вошли в лимит")
 
 
 if __name__ == "__main__":
